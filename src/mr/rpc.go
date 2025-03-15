@@ -6,7 +6,9 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"os"
+)
 import "strconv"
 
 //
@@ -22,8 +24,47 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type RegisterResponse struct {
+	BaseResponse
+	workerId int
+	nReduce  int
+}
 
+const (
+	STATE_UNKNOWN int = 403
+	STATE_OK      int = 200
+	STATE_ERROR   int = 500
+	STATE_REQUEST_FAIL 501
+)
+
+type BaseResponse struct {
+	state int
+}
+
+type PingResponse struct {
+	BaseResponse
+}
+
+
+type RequestTaskResponse struct {
+	BaseResponse
+	//1-map, 2-reduce
+	taskType int
+	mapTaskKey string
+	mapTaskNumber int
+
+	reduceTaskNumber int
+	reduceTaskIntermediateFiles []string
+}
+
+// Add your RPC definitions here.
+type CoordinateFunc interface {
+	keepAlive(workerID int) error
+	register() error
+	getTask() error
+	mapTaskDone() error
+	reduceTaskDone() error
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
