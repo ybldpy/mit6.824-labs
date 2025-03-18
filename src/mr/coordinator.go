@@ -10,14 +10,36 @@ import "os"
 import "net/rpc"
 import "net/http"
 
+type Task struct {
+	//0 - map 1-reduce
+	taskType int
+	//0-idle -1 in progress 2-completed
+	taskState  int
+	taskId     int
+	mapTaskKey string
+
+	workerId int
+}
+
 type Coordinator struct {
 	// Your definitions here.
-	srcFiles          []string
-	nReduce           int
-	intermediateFiles []string
+	mapTasks    []Task
+	mapTaskLock sync.Mutex
+	mapTaskDoneCount int
+	mapTaskDoneLock  sync.Mutex
+
+	reduceTasks    []Task
+	reduceTaskLock sync.Mutex
+	reduceTaskDoneCount int
+	reduceTaskDoneLock  sync.Mutex
+
+	//intermediateFiles map[int][]string
 
 	workers     map[int]int64
 	workersLock sync.Mutex
+
+	executingTasks map[int]*Task
+	executingTasksLock sync.Mutex
 
 	workerIndex   int
 	workerIdxLock sync.Mutex
@@ -26,8 +48,12 @@ type Coordinator struct {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) register() error {
+func (c *Coordinator) Register() error {
 	return nil
+}
+
+func (c *Coordinator) TaskDone(request *TaskDoneRequest) error {
+
 }
 
 func (c *Coordinator) removeDeadWorker() {
@@ -53,7 +79,7 @@ func (c *Coordinator) isValidWorker(wid int) bool {
 	return exists
 }
 
-func (c *Coordinator) keepAlive(workerID int, response *BaseResponse) error {
+func (c *Coordinator) KeepAlive(workerID int, response *BaseResponse) error {
 
 	if !c.isValidWorker(workerID) {
 		response.state = STATE_UNKNOWN
@@ -64,19 +90,90 @@ func (c *Coordinator) keepAlive(workerID int, response *BaseResponse) error {
 	return nil
 }
 
-func (c *Coordinator) getTask(workerID int, response *RequestTaskResponse) error {
+func (c *Coordinator) AllocateIdleTask(tasks *[]Task, locker *sync.Mutex, wid int, workerTask *WorkerTask) {
+	locker.Lock()
+	defer locker.Unlock()
+	for i := range *tasks {
+		if (*tasks)[i].taskState == 0 {
+			workerTask.taskType = (*tasks)[i].taskType
+			workerTask.taskId = (*tasks)[i].taskId
+			workerTask.taskParams = (*tasks)[i].mapTaskKey
+			(*tasks)[i].taskState = 1
+			c.executingTasks[wid] = &(*tasks)[i]
+		}
+	}
+
+}
+
+func (c *Coordinator) GetTask(workerID int, response *RequestTaskResponse) error {
 	if !c.isValidWorker(workerID) {
 		response.state = STATE_UNKNOWN
 		return nil
 	}
 
+	if c.Done(){
+		response.allTaskDone = true
+		return nil
+	}
+
+
+	response.state = STATE_OK
+	var workerTask WorkerTask = WorkerTask{-1, -1, ""}
+	c.AllocateIdleTask(&c.mapTasks, &c.mapTaskLock, workerID, &workerTask)
+	if workerTask.taskType != -1 {
+		response.task = workerTask
+		return nil
+	}
+	c.AllocateIdleTask(&c.reduceTasks, &c.reduceTaskLock, workerID, &workerTask)
+	response.task = workerTask
+	return nil
+
 }
 
-func (c *Coordinator) mapTaskDone() error {
+func (c *Coordinator) TaskDone(request *TaskDoneRequest, response *BaseResponse) error  {
+	if !c.isValidWorker(request.wid) {
+		response.state = STATE_UNKNOWN
+		return nil
+	}
+
+	task := nil
+	if request.workerTask.taskType == 0 {
+		task = &c.mapTasks[request.workerTask.taskId]
+	}
+	else {
+		task = &c.reduceTasks[request.workerTask.taskId]
+	}
+	c.processTaskDone(task,request.wid)
+	response.state = STATE_OK
 	return nil
 }
 
-func (c *Coordinator) reduceTaskDone() error {
+
+func (c *Coordinator) processTaskDone(task *Task,wid int) error {
+
+	c.executingTasksLock.Lock()
+	var executingTask *Task = c.executingTasks[wid]
+	if executingTask == nil {
+		c.executingTasksLock.Unlock()
+		return nil
+	}
+	delete(c.executingTasks, wid)
+	c.executingTasksLock.Unlock()
+
+	lock:=&c.mapTaskDoneLock
+	count:=&c.mapTaskDoneCount
+	if task.taskType == 1 {
+		lock = &c.reduceTaskDoneLock
+		count = &c.reduceTaskDoneCount
+	}
+	task.taskState = 2
+	lock.Lock()
+	(*count)+=1
+	lock.Unlock()
+	return nil;
+}
+
+func (c *Coordinator) reduceTaskDone(task WorkerTask) error {
 	return nil
 }
 
@@ -105,20 +202,60 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
 	// Your code here.
+	c.mapTaskDoneLock.Lock()
+	defer c.mapTaskDoneLock.Unlock()
+	if c.mapTaskDoneCount < len(c.mapTasks) {
+		return false
+	}
+	c.reduceTaskDoneLock.Lock()
+	defer c.reduceTaskDoneLock.Unlock()
+	if c.reduceTaskDoneCount < len(c.reduceTasks) {
+		return false
+	}
+	return true
+}
 
-	return ret
+func initCoordinator(files []string, nReduce int) *Coordinator {
+
+	var mapTasks []Task = make([]Task, len(files))
+
+	for i := range mapTasks {
+		mapTask := &mapTasks[i]
+		mapTask.taskType = 0
+		mapTask.taskState = 0
+		mapTask.taskId = i
+		mapTask.mapTaskKey = files[i]
+		mapTask.workerId = -1
+	}
+
+	var reduceTasks []Task = make([]Task, nReduce)
+	for i := range reduceTasks {
+		reduceTasks[i].taskType = 1
+		reduceTasks[i].taskState = 0
+		reduceTasks[i].taskId = i
+		reduceTasks[i].workerId = -1
+	}
+
+	c := Coordinator{
+		mapTasks:          mapTasks,
+		reduceTasks:       reduceTasks,
+		workers:           make(map[int]int64),
+	}
+
+	return &c
+
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{files, nReduce, make([]string, 0), make(map[int]int64), 0, 10}
+	c := initCoordinator(files, nReduce)
 	// Your code here.
-
 	c.server()
-	return &c
+
+	go c.removeDeadWorker()
+
+	return c
 }

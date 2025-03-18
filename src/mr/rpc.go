@@ -8,6 +8,7 @@ package mr
 
 import (
 	"os"
+	"sync"
 )
 import "strconv"
 
@@ -45,25 +46,34 @@ type PingResponse struct {
 	BaseResponse
 }
 
+type WorkerTask struct {
+	taskType int
+	taskId   int
+	taskParams string
+}
+
+
+type TaskDoneRequest struct {
+	workerTask WorkerTask
+	//0-fail 1-success
+	state int
+	wid int
+}
+
 
 type RequestTaskResponse struct {
 	BaseResponse
-	//1-map, 2-reduce
-	taskType int
-	mapTaskKey string
-	mapTaskNumber int
-
-	reduceTaskNumber int
-	reduceTaskIntermediateFiles []string
+	task WorkerTask
+	allTaskDone bool
 }
 
 // Add your RPC definitions here.
 type CoordinateFunc interface {
-	keepAlive(workerID int) error
-	register() error
-	getTask() error
-	mapTaskDone() error
-	reduceTaskDone() error
+	KeepAlive(workerID int, response *BaseResponse) error
+	Register() error
+	GetTask(workerID int, response *RequestTaskResponse) error
+	AllocateIdleTask(tasks *[]Task, locker *sync.Mutex, wid int, workerTask *WorkerTask) error
+	TaskDone(request *TaskDoneRequest) error
 }
 
 // Cook up a unique-ish UNIX-domain socket name

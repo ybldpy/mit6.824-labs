@@ -1,7 +1,13 @@
 package mr
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 )
 import "log"
@@ -30,6 +36,8 @@ const (
 	getTask        = "Coordinator.getTask"
 	mapTaskDone    = "Coordinator.mapTaskDone"
 	reduceTaskDone = "Coordinator.reduceTaskDone"
+	taskDone       = "Coordinator.taskDone"
+	queryIntermediateFileLocations = "Coordinator.queryIntermediateFileLocations"
 )
 
 func registerWorker() RegisterResponse {
@@ -70,8 +78,24 @@ func (this *MapReduceWorker) register() bool{
 	return false;
 }
 
+
+
+func (this *MapReduceWorker) taskDone(task *WorkerTask,state int){
+
+
+	taskDoneRequest:=TaskDoneRequest{workerTask: *task,state: state}
+	response := BaseResponse{}
+	call(taskDone,&taskDoneRequest,&response)
+
+
+
+}
+
+
 //stop everything
 func (this *MapReduceWorker) offLine()  {
+
+
 
 }
 
@@ -90,24 +114,155 @@ func (this *MapReduceWorker) pingRequest(workerId int){
 	}
 }
 
+func (this *MapReduceWorker) doMap(task *WorkerTask) int{
+	this.sendPingRequest = true
 
+	var key string = task.taskParams
 
-func (this *MapReduceWorker) requestTask()  {
+	data,e := ioutil.ReadFile(key)
+	if e != nil{
+		this.sendPingRequest = false
+		return -1
+	}
+
+	var keyValues []KeyValue = mapF(key,string(data))
+
+	var intermidateFiles map[int]*os.File = make(map[int]*os.File)
+	var encoders map[int]*json.Encoder = make(map[int]*json.Encoder)
+
+	for i:=0;i<this.nReduce;i++{
+		filename := filepath.Join("mr-tmp",
+			fmt.Sprintf("mr-%d-%d", task.taskId, i))
+		os.MkdirAll("mr-tmp", 0777)
+		f,err := os.Create(filename)
+		if err != nil{
+			return -1
+		}
+		defer f.Close()
+		intermidateFiles[i] = f
+		encoders[i] = json.NewEncoder(f)
+	}
+
+	for _,kv:=range keyValues{
+		h := fnv.New32a()
+		h.Write([]byte(kv.Key))
+		partition := int(h.Sum32()) % this.nReduce
+		if err := encoders[partition].Encode(&kv); err != nil {
+			return -1
+		}
+	}
 	this.sendPingRequest = false
+	return 0
+}
+
+func (this *MapReduceWorker) queryIntermediateFilesLocations(reduceNumber int) []string  {
+
+
+}
+
+
+
+
+func (this *MapReduceWorker) doReduce(task *WorkerTask) int {
+
+	files := this.queryIntermediateFilesLocations(task.taskId)
+	keyValues := make(map[string][]string)
+	sortedKeys := make([]string, 0)
+
+	for i:=0;i<len(files);i++{
+		f,e := os.Open(files[i])
+		if e!=nil{
+			return -1
+		}
+
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Text()
+			var kv KeyValue = KeyValue{}
+			json.Unmarshal([]byte(line),&kv)
+			key := kv.Key
+			if _,ok := keyValues[key]; !ok {
+				sortedKeys = append(sortedKeys, key)
+			}
+			keyValues[key]=append(keyValues[key],kv.Value)
+		}
+	}
+
+
+	sort.Strings(sortedKeys)
+	outputFile, err := os.Create(fmt.Sprintf("mr-out-%d", task.taskId))
+
+	if err != nil {
+		return -1
+	}
+	defer outputFile.Close()
+	for i:=0;i<len(sortedKeys);i++{
+		output:=reduceF(sortedKeys[i],keyValues[sortedKeys[i]])
+		fmt.Fprintf(outputFile,"%v %v\n",sortedKeys[i],output)
+	}
+	return 0
+
+
+
+
+
+
+}
+
+
+func (this *MapReduceWorker) requestTask(task *WorkerTask) int {
+	this.sendPingRequest = false
+
+	getTaskResponse :=RequestTaskResponse{}
+	ok := call(getTask, this.workerId, &getTaskResponse);
+	if !ok{
+		return 1
+	}
+	if getTaskResponse.state ==STATE_UNKNOWN{
+		return 2
+	}
+
+	*task = getTaskResponse.task
+	return 0
 
 }
 
 //return work state
-//-1 network error
+//0: finish, 1:restart
 func (this *MapReduceWorker) start() int{
+
+
 
 	var registerResult bool = this.register();
 	if !registerResult {
-		return -1;
+		return 0;
 	}
 
-	this.requestTask()
 
+	for true{
+
+		var task WorkerTask = WorkerTask{-1,-1,"",false};
+		requestState := this.requestTask(&task)
+		if requestState !=0 || task.allTaskDone{
+			return requestState
+		}
+		if !task.allTaskDone {
+			this.sendPingRequest = true
+			time.Sleep(3*time.Second);
+			continue;
+		}
+		var taskState int = -1
+		if task.taskType == 0 {
+			taskState = this.doMap(&task);
+		}
+		else {
+			taskState = this.doReduce(&task);
+		}
+
+		this.taskDone(&task, taskState)
+
+	}
 
 }
 
