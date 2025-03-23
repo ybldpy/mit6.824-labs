@@ -227,18 +227,18 @@ func (c *Coordinator) processTaskDone(task *Task, wid int) {
 	//delete(c.executingTasks, wid)
 	//c.executingTasksLock.Unlock()
 
-	lock := &c.mapTaskDoneLock
+	lock := &c.mapTaskLock
 	count := &c.mapTaskDoneCount
 	countLock := &c.mapTaskDoneLock
 	if task.taskType == 1 {
-		lock = &c.reduceTaskDoneLock
+		lock = &c.reduceTaskLock
 		count = &c.reduceTaskDoneCount
 		countLock = &c.reduceTaskDoneLock
 	}
 
 	completed := false
 	lock.Lock()
-	if task.taskState == 1 {
+	if task.taskState != 2 {
 		task.taskState = 2
 		completed = true
 	}
