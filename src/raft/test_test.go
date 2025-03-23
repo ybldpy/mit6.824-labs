@@ -106,8 +106,6 @@ func TestManyElections2A(t *testing.T) {
 		i2 := rand.Int() % servers
 		i3 := rand.Int() % servers
 		i4 := rand.Int() % servers
-		i5 := rand.Int() % servers
-		i6 := rand.Int() % servers
 
 		cfg.disconnect(i1)
 		cfg.disconnect(i2)

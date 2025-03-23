@@ -67,3 +67,15 @@
 
 ## Raft
 
+## Part 2A: Leader Election
+
+### 测试结果
+
+18个server，迭代800次，每次迭代随机4台机器掉线
+
+![image-20250323130515038](img/2a.png)
+
+
+
+
+
