@@ -8,9 +8,9 @@ package mr
 
 import (
 	"os"
+	"strconv"
 	"sync"
 )
-import "strconv"
 
 //
 // example to show how to declare the arguments
@@ -27,19 +27,19 @@ type ExampleReply struct {
 
 type RegisterResponse struct {
 	BaseResponse
-	workerId int
-	nReduce  int
+	WorkerId int
+	NReduce  int
 }
 
 const (
-	STATE_UNKNOWN int = 403
-	STATE_OK      int = 200
-	STATE_ERROR   int = 500
-	STATE_REQUEST_FAIL 501
+	STATE_UNKNOWN      int = 403
+	STATE_OK           int = 200
+	STATE_ERROR        int = 500
+	STATE_REQUEST_FAIL     = 501
 )
 
 type BaseResponse struct {
-	state int
+	State int
 }
 
 type PingResponse struct {
@@ -47,24 +47,23 @@ type PingResponse struct {
 }
 
 type WorkerTask struct {
-	taskType int
-	taskId   int
-	taskParams string
+	TaskType                  int
+	TaskId                    int
+	MapTaskKey                string
+	IntermediateFileLocations []string
 }
-
 
 type TaskDoneRequest struct {
-	workerTask WorkerTask
+	WorkerTask WorkerTask
 	//0-fail 1-success
-	state int
-	wid int
+	State int
+	Wid   int
 }
-
 
 type RequestTaskResponse struct {
 	BaseResponse
-	task WorkerTask
-	allTaskDone bool
+	Task        WorkerTask
+	AllTaskDone bool
 }
 
 // Add your RPC definitions here.
