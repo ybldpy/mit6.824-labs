@@ -1,8 +1,10 @@
-# MapReduce 项目说明
+# MIT-6.824 Labs
 
-## 项目难点
+# MapReduce
 
-本项目的难点主要在于 **Coordinator** 对任务的分配与对崩溃（crash）Worker 的处理策略。
+## 核心
+
+本项目的核心主要在于 **Coordinator** 对任务的分配与对崩溃（crash）Worker 的处理策略。
 
 ------
 
@@ -58,3 +60,10 @@
 ## 测试结果
 
 ![image-20250323130515038](img/mapreduce.png)
+
+
+
+
+
+## Raft
+
