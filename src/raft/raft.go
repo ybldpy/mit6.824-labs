@@ -55,23 +55,41 @@ type AppendEntriesRequest struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	LeaderCommit int
-	Entries      []int
+	Entries      []LogEntry
 }
 
 type AppendEntriesResponse struct {
 	Term    int
 	Success bool
+
+	CommitIndex int
+	LogTerms    []int
 }
 
 type RaftState struct {
 	term     int
 	termLock sync.Mutex
 	//0-follower 1-candicate 2-leader
-	role              int
-	electionTimeOut   int64
-	lastHeartBeat     int64
-	lastHeartBeatLock sync.Mutex
-	canVote           bool
+	role            int
+	electionTimeOut int64
+	lastHeartBeat   int64
+	canVote         bool
+	logsState       LogsState
+}
+
+type LogEntry struct {
+	Term    int
+	Idx     int
+	Command interface{}
+}
+type LogsState struct {
+	logs          []LogEntry
+	logsLock      sync.Mutex
+	nextIndex     map[int]int
+	nextIndexLock sync.Mutex
+	matchIndex    map[int]int
+	commitedIndex int
+	lastApplied   int
 }
 
 // A Go object implementing a single Raft peer.
@@ -82,31 +100,36 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 	id        int
-
 	// Your data here (2A, 2B, 2C).
-	raftState     RaftState
-	raftStateLock sync.Mutex
+	raftState          RaftState
+	syncLogFuncChannel chan int
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 }
 
 func (rf *Raft) updateHeartBeat() {
-	rf.raftState.lastHeartBeatLock.Lock()
-	defer rf.raftState.lastHeartBeatLock.Unlock()
+
 	rf.raftState.lastHeartBeat = curMill()
 }
 
 func (rf *Raft) AppendEntries(req *AppendEntriesRequest, res *AppendEntriesResponse) {
+
+	rf.raftState.termLock.Lock()
 	if len(req.Entries) == 0 {
-		rf.raftState.termLock.Lock()
 		if req.Term >= rf.raftState.term {
 			rf.raftState.role = 0
 			rf.raftState.term = req.Term
-			//rf.raftState.canVote = true
+			rf.raftState.canVote = true
 			rf.updateHeartBeat()
 		}
 		rf.raftState.termLock.Unlock()
+	}
+
+	if rf.raftState.role == 2 {
+		rf.raftState.termLock.Unlock()
+		res.Term = req.Term
+		res.Success = true
+		return
 	}
 
 }
@@ -210,11 +233,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if rf.raftState.term < args.Term {
-		rf.raftState.lastHeartBeatLock.Lock()
 		rf.updateTerm(args.Term)
 		rf.roleChange(0)
 		rf.raftState.canVote = true
-		rf.raftState.lastHeartBeatLock.Unlock()
+
 	}
 
 	//fmt.Printf("%d voted to %d: %v\n", rf.me, args.CandidateId, rf.raftState.canVote)
@@ -255,6 +277,121 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+func (rf *Raft) sendAppendLogRequest(peerIndex int, peerAccptSignalChan chan int) {
+
+	for {
+
+		rf.raftState.termLock.Lock()
+		term := rf.raftState.term
+		role := rf.raftState.role
+		commitIndex := rf.raftState.logsState.commitedIndex
+		rf.raftState.termLock.Unlock()
+		//exit early. If term increase and role changes when executing following, the peer will reject our request so it won't cause any problem.
+		if role != 2 {
+			peerAccptSignalChan <- 0
+			return
+		}
+
+		//rf.raftState.logsState.nextIndexLock.Lock()
+		sendLogIndex := rf.raftState.logsState.nextIndex[peerIndex]
+		//rf.raftState.logsState.nextIndexLock.Unlock()
+
+		rf.raftState.logsState.logsLock.Lock()
+		prevLogTerm := rf.raftState.logsState.logs[sendLogIndex].Term
+		entries := make([]LogEntry, len(rf.raftState.logsState.logs)-sendLogIndex)
+		for i := 0; i < len(entries); i++ {
+			entries[i] = rf.raftState.logsState.logs[sendLogIndex+i]
+		}
+		rf.raftState.logsState.logsLock.Unlock()
+
+		response := AppendEntriesResponse{}
+		request := AppendEntriesRequest{Term: term, LeaderId: rf.me, PrevLogIndex: sendLogIndex - 1, PrevLogTerm: prevLogTerm, LeaderCommit: commitIndex}
+		ok := rf.peers[peerIndex].Call("Raft.AppendEntries", &request, &response)
+		if !ok {
+			//try again until success
+			continue
+		}
+		if response.Term > term {
+			//become a follower.
+			rf.raftState.termLock.Lock()
+			if response.Term > rf.raftState.term {
+				rf.updateTerm(response.Term)
+				rf.updateHeartBeat()
+				rf.roleChange(0)
+			}
+			rf.raftState.termLock.Unlock()
+			return
+		}
+		if response.Success {
+			peerAccptSignalChan <- 1
+			return
+		}
+
+		rf.raftState.logsState.logsLock.Lock()
+		i := response.CommitIndex
+		for ; i < len(rf.raftState.logsState.logs); i++ {
+			if rf.raftState.logsState.logs[i].Term != response.LogTerms[i] {
+				break
+			}
+		}
+		rf.raftState.logsState.nextIndex[peerIndex] = i
+		rf.raftState.logsState.logsLock.Unlock()
+
+	}
+
+}
+
+func (rf *Raft) commitLog(commitIndex int) {
+	log := &rf.raftState.logsState.logs[commitIndex]
+	if rf.raftState.role != 2 {
+		//todo: do commit
+		rf.raftState.logsState.commitedIndex = commitIndex
+	} else {
+		if rf.raftState.term == log.Term {
+			//todo: do commit
+
+			rf.raftState.logsState.commitedIndex = commitIndex
+		}
+
+	}
+}
+
+func (rf *Raft) synLog() {
+
+	for true {
+		committIndex := <-rf.syncLogFuncChannel
+		peerAccptSignalChan := make(chan int)
+		for i := 0; i < len(rf.peers); i++ {
+			if rf.me == i {
+				continue
+			}
+			go rf.sendAppendLogRequest(i, peerAccptSignalChan)
+		}
+
+		accptCount := 1
+	outer:
+		for rf.raftState.role == 2 {
+			select {
+			case accept := <-peerAccptSignalChan:
+				if accept <= 0 {
+					break outer
+				}
+				accptCount += accept
+				if accptCount > len(rf.peers) {
+					rf.raftState.termLock.Lock()
+					rf.commitLog(committIndex)
+					rf.raftState.termLock.Unlock()
+					accptCount = -1
+				}
+			}
+		}
+
+		close(peerAccptSignalChan)
+
+	}
+
+}
+
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
@@ -274,6 +411,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 
+	rf.raftState.termLock.Lock()
+	index = len(rf.raftState.logsState.logs)
+	term = rf.raftState.term
+	isLeader = rf.raftState.role == 2
+	if isLeader {
+		rf.raftState.logsState.logsLock.Lock()
+		log := LogEntry{Term: term, Idx: len(rf.raftState.logsState.logs), Command: command}
+		rf.raftState.logsState.logs = append(rf.raftState.logsState.logs, log)
+		rf.syncLogFuncChannel <- len(rf.raftState.logsState.logs) - 1
+		rf.raftState.logsState.logsLock.Unlock()
+	}
+	rf.raftState.termLock.Unlock()
 	return index, term, isLeader
 }
 
@@ -319,11 +468,9 @@ func (rf *Raft) sendVotesRequest(peer *labrpc.ClientEnd, channel chan int, args 
 		vote := 0
 		rf.raftState.termLock.Lock()
 		if reply.Term > rf.raftState.term {
-			rf.raftState.lastHeartBeatLock.Lock()
 			rf.updateTerm(reply.Term)
 			rf.roleChange(0)
 			rf.raftState.canVote = true
-			rf.raftState.lastHeartBeatLock.Unlock()
 			vote = -1
 		}
 		rf.raftState.termLock.Unlock()
@@ -408,7 +555,6 @@ func (rf *Raft) ticker() {
 		updateTerm := -1
 		if rf.raftState.role != 2 {
 			now := curMill()
-			rf.raftState.lastHeartBeatLock.Lock()
 			diff := now - rf.raftState.lastHeartBeat
 			if diff > timeout {
 				updateTerm = rf.raftState.term + 1
@@ -417,7 +563,6 @@ func (rf *Raft) ticker() {
 				rf.raftState.canVote = false
 				go rf.askVotes(rf.raftState.term)
 			}
-			rf.raftState.lastHeartBeatLock.Unlock()
 		}
 		//fmt.Printf("term: %d", rf.raftState.term)
 		rf.raftState.termLock.Unlock()
@@ -449,6 +594,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.synLog()
 
 	return rf
 }
