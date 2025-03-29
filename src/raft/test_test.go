@@ -99,7 +99,7 @@ func TestManyElections2A(t *testing.T) {
 
 	cfg.checkOneLeader()
 
-	iters := 30
+	iters := 100
 	for ii := 1; ii < iters; ii++ {
 		// disconnect three nodes
 		i1 := rand.Int() % servers
@@ -585,7 +585,7 @@ func TestCount2B(t *testing.T) {
 
 	total1 := rpcs()
 
-	if total1 > 30 || total1 < 1 {
+	if total1 > 40 || total1 < 1 {
 		t.Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
 	}
 

@@ -79,3 +79,34 @@
 
 
 
+## Part 2B: Log Replication
+
+### 实现
+
+1. **节点角色与数据接收**
+   - 只有成为 **leader** 的节点可以接收新的数据。**follower** 和 **candidate** 节点会拒绝接收新的数据。
+2. **Leader 选举**
+   1. **2B 的 Leader 选举与 2A 不同**：在 2A 中，选举时不需要考虑自己的日志和候选者日志的新旧程度，而在 2B 中，需要考虑：
+      - 如果本节点记录的最后一条日志的 **term** 超过了候选者的 **LastLogTerm**，说明候选者的日志比较旧，本节点可以拒绝投票。
+      - 如果本节点的最后一条日志与候选者相同，且 **PrevLogIndex** 比候选者的 **LastLogIndex** 要长，本节点可以拒绝投票。
+      - 总结：只有当 **PrevLogTerm <= LastLogTerm && PrevLogIndex <= LastLogIndex** 时，才能投票，否则拒绝投票。
+   2. 为了避免频繁的选举触发，建议设置更大的 **ElectionTimeout** 范围。若不调整范围，可能会导致 **follower** 或 **candidate** 频繁超时，进而重新触发选举，导致新的 **leader** 选举出来后又被推翻，造成选举风暴。
+   3. 一旦 **leader** 选举成功，它会初始化 **nextIndex[]**，并将所有值设置为 **len(this.logs)**。
+3. **Leader 新日志添加**
+   1. 当新日志被添加时，**leader** 会将日志追加到 **logs** 数组中，并通过 **channel** 发送该日志的索引到负责复制日志的协程，通知其进行日志同步。
+   2. 日志同步过程：
+      - 复制日志时，使用 **nextIndex[followerId]** 来确定从哪里开始同步，发送 **logs[nextIndex[followerId]: ]**。
+      - 如果多条日志并发写入，日志索引会保持不变，后续的日志可以一起同步，减少了 RPC 次数。
+      - 当日志与 **follower** 冲突时，回退 **nextIndex[followerId]**，实现优化的回退算法。
+      - 当超过半数的 **follower** 复制成功后，更新 **commitIndex** 为 **复制的最后一个日志的 Index**。
+4. **Follower 的 AppendEntries**
+   1. 如果 **follower** 的 **LastLogIndex** 小于 **PrevLogIndex**，说明 **leader** 发送的日志起始位置大于 **follower**，无法接收日志，返回 **false**。
+   2. 如果 **follower** 的 **LastLogIndex** 大于等于 **PrevLogIndex**，比较 **logs[PrevLogIndex].Term** 和 **PrevLogTerm**，若不相同，则说明存在冲突，无法同步，返回 **false**。
+   3. 当日志不冲突时，更新 **follower** 的 **logs = logs[:PrevLogIndex+1]**，删除冲突日志，并将 **leader** 发来的日志添加到 **logs** 末尾。
+   4. 收到心跳时，**leaderCommitIndex** 会携带 **leader** 提交的最大日志 **index**。如果 **follower** 的 **commitIndex** 小于 **leaderCommitIndex**，则更新 **commitIndex = min(len(logs)-1, leaderCommitIndex)**。
+
+### 测试结果
+
+成功通过 200 轮测试，稳定运行。
+
+![2b](D:\golang\6.824\img\2b.png)
